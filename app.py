@@ -11,7 +11,6 @@ import json
 
 st.set_page_config(page_title="Vizara Media - Lead Scraper", page_icon="🚀", layout="wide")
 
-# Custom Styling
 st.markdown("""
     <style>
     .main-header { font-size: 32px; font-weight: bold; color: #1E88E5; }
@@ -51,44 +50,56 @@ def get_gspread_client():
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
-    if "GCP_JSON" in st.secrets:
-        raw_json_str = st.secrets["GCP_JSON"]
-        # Clean control characters (like unescaped newlines) that break json.loads
-        cleaned_json_str = re.sub(r'[\r\n\t]', ' ', raw_json_str) if "\\n" in raw_json_str else raw_json_str
-        try:
-            creds_dict = json.loads(raw_json_str, strict=False)
-        except Exception:
-            creds_dict = json.loads(cleaned_json_str, strict=False)
-        
-        # Ensure private key handles newlines cleanly
-        if "private_key" in creds_dict and "\\n" in creds_dict["private_key"]:
-            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    elif "gcp_service_account" in st.secrets:
+    if "gcp_service_account" in st.secrets:
         creds = Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]), scopes=scopes)
+    elif "GCP_JSON" in st.secrets:
+        creds_dict = json.loads(st.secrets["GCP_JSON"], strict=False)
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     else:
         st.error("No Google Credentials found in Secrets.")
         return None
     return gspread.authorize(creds)
 
+def ensure_clean_headers(worksheet):
+    headers = [
+        "Channel ID", "Channel Name", "Channel URL", 
+        "Subscribers", "Total Videos", "Last Upload Date", 
+        "Extracted Emails", "Social Links", "Source Keyword", "Scraped Date"
+    ]
+    existing = worksheet.get_all_values()
+    if not existing:
+        worksheet.append_row(headers)
+        worksheet.format("A1:J1", {
+            "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+            "backgroundColor": {"red": 0.12, "green": 0.53, "blue": 0.90},
+            "horizontalAlignment": "CENTER"
+        })
+    elif existing[0] != headers:
+        # If row 1 isn't our standard headers, insert header row
+        worksheet.insert_row(headers, index=1)
+        worksheet.format("A1:J1", {
+            "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+            "backgroundColor": {"red": 0.12, "green": 0.53, "blue": 0.90},
+            "horizontalAlignment": "CENTER"
+        })
+
 def extract_emails(text):
     if not text:
-        return ""
+        return "N/A"
     email_regex = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
     emails = re.findall(email_regex, text)
-    return ", ".join(list(set(emails)))
+    return ", ".join(list(set(emails))) if emails else "N/A"
 
 def extract_socials(text):
     if not text:
-        return ""
+        return "N/A"
     social_domains = ['instagram.com', 'twitter.com', 'x.com', 'linkedin.com', 'facebook.com', 'tiktok.com']
     found = []
     for line in text.split():
         for domain in social_domains:
             if domain in line.lower():
                 found.append(line.strip())
-    return ", ".join(list(set(found)))
+    return ", ".join(list(set(found))) if found else "N/A"
 
 def run_scraper():
     if not api_key:
@@ -101,6 +112,7 @@ def run_scraper():
             return
         sh = gc.open_by_url(sheet_url)
         worksheet = sh.sheet1
+        ensure_clean_headers(worksheet)
     except Exception as e:
         st.error(f"Failed to connect to Google Sheet: {e}")
         return
