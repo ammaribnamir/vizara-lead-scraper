@@ -52,7 +52,18 @@ def get_gspread_client():
         "https://www.googleapis.com/auth/drive"
     ]
     if "GCP_JSON" in st.secrets:
-        creds_dict = json.loads(st.secrets["GCP_JSON"])
+        raw_json_str = st.secrets["GCP_JSON"]
+        # Clean control characters (like unescaped newlines) that break json.loads
+        cleaned_json_str = re.sub(r'[\r\n\t]', ' ', raw_json_str) if "\\n" in raw_json_str else raw_json_str
+        try:
+            creds_dict = json.loads(raw_json_str, strict=False)
+        except Exception:
+            creds_dict = json.loads(cleaned_json_str, strict=False)
+        
+        # Ensure private key handles newlines cleanly
+        if "private_key" in creds_dict and "\\n" in creds_dict["private_key"]:
+            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     elif "gcp_service_account" in st.secrets:
         creds = Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]), scopes=scopes)
