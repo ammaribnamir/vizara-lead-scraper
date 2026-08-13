@@ -1,253 +1,230 @@
-from datetime import datetime, timedelta, timezone
-import gspread
-from googleapiclient.discovery import build
-from oauth2client.service_account import ServiceAccountCredentials
 import streamlit as st
+import googleapiclient.discovery
+import googleapiclient.errors
+import gspread
+from google.oauth2.service_account import Credentials
+import pandas as pd
+import datetime
+import re
+import isodate
+import json
 
-st.set_page_config(
-    page_title="Vizara Media - Lead Scraper", page_icon="🚀", layout="wide"
-)
+st.set_page_config(page_title="Vizara Media - Lead Scraper", page_icon="🚀", layout="wide")
 
-st.title("🚀 Vizara Media - YouTube Lead Scraper")
-st.subheader("Automated Lead Generation for Podcast & Creator Outreach")
+# Custom Styling
+st.markdown("""
+    <style>
+    .main-header { font-size: 32px; font-weight: bold; color: #1E88E5; }
+    .sub-header { font-size: 18px; color: #555555; }
+    .stButton>button { background-color: #FF0000; color: white; font-weight: bold; border-radius: 8px; }
+    </style>
+""", unsafe_allow_html=True)
 
-# Setup Credentials from Streamlit Secrets
-@st.cache_resource
-def get_gspread_client():
-  scope = [
-      "https://spreadsheets.google.com/feeds",
-      "https://www.googleapis.com/auth/drive",
-  ]
-  creds_dict = dict(st.secrets["gcp_service_account"])
-  creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-  return gspread.authorize(creds)
+st.markdown('<div class="main-header">🚀 Vizara Media - YouTube Lead Scraper</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Automated Lead Generation for Podcast & Creator Outreach</div><br>', unsafe_allow_html=True)
 
-
-# Sidebar Inputs & Controls
+# Sidebar Configuration
 st.sidebar.header("⚙️ Configuration")
-api_key = st.sidebar.text_input(
-    "YouTube API Key",
-    value=st.secrets.get("YOUTUBE_API_KEY", ""),
-    type="password",
-)
+
+default_api_key = st.secrets.get("YOUTUBE_API_KEY", "")
+api_key = st.sidebar.text_input("YouTube API Key", value=default_api_key, type="password")
+
 sheet_url = st.sidebar.text_input(
     "Google Sheet URL",
-    value="https://docs.google.com/spreadsheets/d/1jtLtJDUoN_zQAytI3nWlnWdNO7iS7MAfSjy0fUcB3-M/edit",
+    value="https://docs.google.com/spreadsheets/d/1jtLtJDUoN_zQAytI3nWlnWdNO7iS7MAfSjy0fUcB3-M/edit?gid=0#gid=0"
 )
 
 st.sidebar.header("🎯 Lead Filters")
-min_subs = st.sidebar.number_input(
-    "Min Subscribers", value=10000, min_value=1000
-)
-max_subs = st.sidebar.number_input(
-    "Max Subscribers", value=800000, min_value=1000
-)
-min_videos = st.sidebar.number_input(
-    "Min Total Videos", value=50, min_value=1
-)
-recent_days = st.sidebar.number_input(
-    "Uploaded Long-form Video Within (Days)", value=14, min_value=1
-)
+min_subs = st.sidebar.number_input("Min Subscribers", value=10000, step=1000)
+max_subs = st.sidebar.number_input("Max Subscribers", value=800000, step=10000)
+min_total_videos = st.sidebar.number_input("Min Total Videos", value=50, step=5)
+uploaded_within_days = st.sidebar.number_input("Uploaded Long-form Video Within (Days)", value=14, step=1)
 
-user_keywords = st.text_area(
+keywords_input = st.text_area(
     "Enter Keywords (separated by commas):",
-    value="business podcast, startup founder podcast, real estate podcast, fitness coach podcast",
-    height=100,
+    value="business podcast, real estate podcast, fitness coach",
+    height=100
 )
 
-ALLOWED_COUNTRIES = {
-    "US",
-    "GB",
-    "FR",
-    "DE",
-    "IT",
-    "BE",
-    "NL",
-    "LU",
-    "DK",
-    "NO",
-    "IS",
-    "PT",
-    "ES",
-    "GR",
-    "CA",
-    "TR",
-    "AU",
-    "NZ",
-    "JP",
-    "SG",
-    "CN",
-    "RU",
-    "PL",
-}
-BANNED_WORDS = [
-    "music",
-    "song",
-    "sing",
-    "singer",
-    "christian",
-    "christianity",
-    "jesus",
-    "church",
-    "bible",
-    "gospel",
-    "alcohol",
-    "wine",
-    "beer",
-    "whiskey",
-    "vodka",
-    "cocktail",
-    "bar",
-    "adultery",
-    "sex",
-    "erotic",
-    "dance",
-    "dancer",
-    "dancing",
-    "choreography",
-]
+def get_gspread_client():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    if "GCP_JSON" in st.secrets:
+        creds_dict = json.loads(st.secrets["GCP_JSON"])
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    elif "gcp_service_account" in st.secrets:
+        creds = Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]), scopes=scopes)
+    else:
+        st.error("No Google Credentials found in Secrets.")
+        return None
+    return gspread.authorize(creds)
 
+def extract_emails(text):
+    if not text:
+        return ""
+    email_regex = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+    emails = re.findall(email_regex, text)
+    return ", ".join(list(set(emails)))
 
-def contains_banned_content(text):
-  if not text:
-    return False
-  text_lower = text.lower()
-  return any(word in text_lower for word in BANNED_WORDS)
+def extract_socials(text):
+    if not text:
+        return ""
+    social_domains = ['instagram.com', 'twitter.com', 'x.com', 'linkedin.com', 'facebook.com', 'tiktok.com']
+    found = []
+    for line in text.split():
+        for domain in social_domains:
+            if domain in line.lower():
+                found.append(line.strip())
+    return ", ".join(list(set(found)))
 
+def run_scraper():
+    if not api_key:
+        st.error("Please provide a valid YouTube API Key.")
+        return
 
-def has_recent_longform_video(youtube, channel_id, days):
-  cutoff_date = (
-      datetime.now(timezone.utc) - timedelta(days=days)
-  ).isoformat()
-  search_response = (
-      youtube.search()
-      .list(
-          channelId=channel_id,
-          part="snippet",
-          order="date",
-          type="video",
-          videoDuration="medium",
-          publishedAfter=cutoff_date,
-          maxResults=1,
-      )
-      .execute()
-  )
-  return len(search_response.get("items", [])) > 0
-
-
-if st.button("🚀 Start Scraping & Sync to Google Sheets", type="primary"):
-  if not api_key:
-    st.error("Please provide a valid YouTube API key!")
-  elif not user_keywords.strip():
-    st.error("Please enter at least one keyword!")
-  else:
     try:
-      youtube = build("youtube", "v3", developerKey=api_key)
-      client = get_gspread_client()
-      sheet = client.open_by_url(sheet_url).sheet1
-
-      # Initialize headers
-      headers = [
-          "Niche/Keyword",
-          "Channel Name",
-          "Subscribers",
-          "Total Videos",
-          "Country",
-          "Channel URL",
-          "Review Status",
-      ]
-      existing_records = sheet.get_all_values()
-      if not existing_records:
-        sheet.append_row(headers)
-
-      keywords_list = [
-          kw.strip() for kw in user_keywords.split(",") if kw.strip()
-      ]
-      all_leads = []
-
-      for kw in keywords_list:
-        st.write(f"🔍 Searching leads for: **{kw}**...")
-        search_response = (
-            youtube.search()
-            .list(
-                q=kw, type="video", part="snippet", order="date", maxResults=50
-            )
-            .execute()
-        )
-        channel_ids = list(
-            set([
-                item["snippet"]["channelId"]
-                for item in search_response.get("items", [])
-            ])
-        )
-
-        if not channel_ids:
-          st.write(f"No results found for '{kw}'.")
-          continue
-
-        channels_response = (
-            youtube.channels()
-            .list(
-                id=",".join(channel_ids),
-                part="snippet,statistics,brandingSettings",
-            )
-            .execute()
-        )
-
-        kw_leads = []
-        for channel in channels_response.get("items", []):
-          channel_id = channel.get("id")
-          snippet = channel.get("snippet", {})
-          stats = channel.get("statistics", {})
-
-          sub_count = int(stats.get("subscriberCount", 0))
-          video_count = int(stats.get("videoCount", 0))
-          country = snippet.get("country", "").upper()
-          title = snippet.get("title", "")
-          description = snippet.get("description", "")
-          default_language = snippet.get("defaultLanguage", "").lower()
-
-          combined_text = f"{title} {description}"
-
-          if video_count < min_videos:
-            continue
-          if not (min_subs <= sub_count <= max_subs):
-            continue
-          if contains_banned_content(combined_text):
-            continue
-          if country and country not in ALLOWED_COUNTRIES:
-            continue
-          if default_language and not default_language.startswith("en"):
-            continue
-          if not has_recent_longform_video(youtube, channel_id, recent_days):
-            continue
-
-          channel_url = f"https://www.youtube.com/channel/{channel_id}"
-          row = [
-              kw,
-              title,
-              sub_count,
-              video_count,
-              country if country else "Not Specified",
-              channel_url,
-              "Pending Verification",
-          ]
-          kw_leads.append(row)
-
-        if kw_leads:
-          sheet.append_rows(kw_leads)
-          all_leads.extend(kw_leads)
-          st.success(
-              f"✅ Added {len(kw_leads)} leads for '{kw}' to Google Sheet!"
-          )
-        else:
-          st.info(f"No leads matched all strict filters for '{kw}'.")
-
-      st.balloons()
-      st.success(
-          f"🎉 Done! Total {len(all_leads)} quality leads uploaded directly to"
-          " your Google Sheet."
-      )
-
+        gc = get_gspread_client()
+        if not gc:
+            return
+        sh = gc.open_by_url(sheet_url)
+        worksheet = sh.sheet1
     except Exception as e:
-      st.error(f"Error: {str(e)}")
+        st.error(f"Failed to connect to Google Sheet: {e}")
+        return
+
+    youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=api_key)
+    keywords = [k.strip() for k in keywords_input.split(",") if k.strip()]
+    
+    st.info(f"Scanning for keywords: {', '.join(keywords)}")
+
+    existing_channel_ids = set()
+    try:
+        existing_records = worksheet.get_all_records()
+        for rec in existing_records:
+            if "Channel ID" in rec:
+                existing_channel_ids.add(str(rec["Channel ID"]))
+    except Exception:
+        pass
+
+    leads_added = 0
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    for idx, kw in enumerate(keywords):
+        status_text.text(f"Searching for '{kw}'...")
+        progress_bar.progress((idx) / len(keywords))
+
+        try:
+            search_response = youtube.search().list(
+                q=kw,
+                type="channel",
+                part="snippet",
+                maxResults=25
+            ).execute()
+
+            channel_ids = [item["snippet"]["channelId"] for item in search_response.get("items", [])]
+
+            if not channel_ids:
+                continue
+
+            channels_response = youtube.channels().list(
+                id=",".join(channel_ids),
+                part="snippet,statistics,contentDetails"
+            ).execute()
+
+            for item in channels_response.get("items", []):
+                c_id = item["id"]
+
+                if c_id in existing_channel_ids:
+                    continue
+
+                stats = item.get("statistics", {})
+                subs = int(stats.get("subscriberCount", 0))
+                video_count = int(stats.get("videoCount", 0))
+
+                if not (min_subs <= subs <= max_subs):
+                    continue
+                if video_count < min_total_videos:
+                    continue
+
+                uploads_playlist_id = item.get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads")
+                if not uploads_playlist_id:
+                    continue
+
+                playlist_response = youtube.playlistItems().list(
+                    playlistId=uploads_playlist_id,
+                    part="snippet",
+                    maxResults=10
+                ).execute()
+
+                recent_videos = playlist_response.get("items", [])
+                if not recent_videos:
+                    continue
+
+                recent_video_ids = [v["snippet"]["resourceId"]["videoId"] for v in recent_videos]
+                video_details = youtube.videos().list(
+                    id=",".join(recent_video_ids),
+                    part="contentDetails,snippet"
+                ).execute()
+
+                has_recent_longform = False
+                latest_upload_date = None
+
+                for v in video_details.get("items", []):
+                    pub_at_str = v["snippet"]["publishedAt"]
+                    pub_at = datetime.datetime.fromisoformat(pub_at_str.replace("Z", "+00:00"))
+
+                    if not latest_upload_date or pub_at > latest_upload_date:
+                        latest_upload_date = pub_at
+
+                    duration_iso = v["contentDetails"]["duration"]
+                    duration_sec = isodate.parse_duration(duration_iso).total_seconds()
+
+                    days_old = (now - pub_at).days
+                    if days_old <= uploaded_within_days and duration_sec >= 120:
+                        has_recent_longform = True
+                        break
+
+                if not has_recent_longform:
+                    continue
+
+                snippet = item["snippet"]
+                title = snippet.get("title", "")
+                description = snippet.get("description", "")
+                custom_url = snippet.get("customUrl", "")
+
+                channel_url = f"https://www.youtube.com/{custom_url}" if custom_url else f"https://www.youtube.com/channel/{c_id}"
+                emails = extract_emails(description)
+                socials = extract_socials(description)
+
+                row = [
+                    c_id,
+                    title,
+                    channel_url,
+                    subs,
+                    video_count,
+                    latest_upload_date.strftime("%Y-%m-%d") if latest_upload_date else "N/A",
+                    emails,
+                    socials,
+                    kw,
+                    now.strftime("%Y-%m-%d %H:%M:%S")
+                ]
+
+                worksheet.append_row(row)
+                existing_channel_ids.add(c_id)
+                leads_added += 1
+
+        except Exception as err:
+            st.warning(f"Error processing keyword '{kw}': {err}")
+
+    progress_bar.progress(1.0)
+    status_text.text("Completed!")
+    st.success(f"Done! Successfully scraped and added {leads_added} new qualified leads to your Google Sheet.")
+    st.balloons()
+
+if st.button("🚀 Start Scraping & Sync to Google Sheets"):
+    run_scraper()
