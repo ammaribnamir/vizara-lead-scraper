@@ -66,22 +66,24 @@ def ensure_clean_headers(worksheet):
         "Subscribers", "Total Videos", "Last Upload Date", 
         "Extracted Emails", "Social Links", "Source Keyword", "Scraped Date"
     ]
-    existing = worksheet.get_all_values()
-    if not existing:
-        worksheet.append_row(headers)
-        worksheet.format("A1:J1", {
-            "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
-            "backgroundColor": {"red": 0.12, "green": 0.53, "blue": 0.90},
-            "horizontalAlignment": "CENTER"
-        })
-    elif existing[0] != headers:
-        # If row 1 isn't our standard headers, insert header row
-        worksheet.insert_row(headers, index=1)
-        worksheet.format("A1:J1", {
-            "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
-            "backgroundColor": {"red": 0.12, "green": 0.53, "blue": 0.90},
-            "horizontalAlignment": "CENTER"
-        })
+    try:
+        existing = worksheet.get_all_values()
+        if not existing:
+            worksheet.append_row(headers)
+            worksheet.format("A1:J1", {
+                "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+                "backgroundColor": {"red": 0.12, "green": 0.53, "blue": 0.90},
+                "horizontalAlignment": "CENTER"
+            })
+        elif existing[0] != headers:
+            worksheet.insert_row(headers, index=1)
+            worksheet.format("A1:J1", {
+                "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+                "backgroundColor": {"red": 0.12, "green": 0.53, "blue": 0.90},
+                "horizontalAlignment": "CENTER"
+            })
+    except Exception:
+        pass
 
 def extract_emails(text):
     if not text:
@@ -204,8 +206,14 @@ def run_scraper():
                     if not latest_upload_date or pub_at > latest_upload_date:
                         latest_upload_date = pub_at
 
-                    duration_iso = v["contentDetails"]["duration"]
-                    duration_sec = isodate.parse_duration(duration_iso).total_seconds()
+                    duration_iso = v.get("contentDetails", {}).get("duration", "")
+                    if not duration_iso:
+                        continue
+
+                    try:
+                        duration_sec = isodate.parse_duration(duration_iso).total_seconds()
+                    except Exception:
+                        duration_sec = 0
 
                     days_old = (now - pub_at).days
                     if days_old <= uploaded_within_days and duration_sec >= 120:
